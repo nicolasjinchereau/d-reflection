@@ -1,6 +1,8 @@
 ### Reflection for the D programming language
 
 ```d
+module main;
+
 struct S {
     float x;
 }
@@ -31,6 +33,10 @@ int main(string[] args)
     assert(y == 2);
     
     reflect!C.getMethod("z").invoke(c);
+    
+    // works at runtime as long as 'reflect!C' has been instantiated
+    auto rt = cast(const(Class))reflect("main.C");
+    rt.getMethod("z").invoke(c);
     
     return 0;
 }
