@@ -37,7 +37,7 @@ enum Protection
     Export,
 }
 
-// specifies that a symbol should not be reflected
+// attribute that specifies that a symbol should not be reflected
 struct NoReflection {}
 
 abstract class Reflection
@@ -1018,7 +1018,7 @@ final class Reflector(alias T)
             static const(Method) refl = new Method(
                  __traits(identifier, T),
                  typeid(typeof(&T)),
-                 fullyQualifiedName!(ReturnType!(typeof(&T))),
+                 fullyQualifiedName!(ReturnType!T),
                  protectionOf!T,
                  __traits(isStaticFunction, T),
                  __traits(isFinalFunction, T),
@@ -1026,7 +1026,7 @@ final class Reflector(alias T)
                  (functionAttributes!(T) & FunctionAttribute.property) != 0,
                  isCallable,
                  paramTypes!T,
-                 [ParameterIdentifierTuple!(typeof(&T))],
+                 [ParameterIdentifierTuple!T],
                  &invoker);
         }
         else
@@ -1114,15 +1114,9 @@ template owningModule(alias T)
         alias owningModule = owningModule!parent;
 }
 
-template isModule(alias T) {
-    static if(!isSomeFunction!T) {
-        import std.algorithm : startsWith;
-        enum isModule = T.stringof.startsWith("module ");
-    }
-    else
-    {
-        enum isModule = false;
-    }
+template isModule(alias T)
+{
+    enum isModule = __traits(isModule, T);
 }
 
 template isField(alias T)
@@ -1207,234 +1201,130 @@ TARGET parseScope(alias SCOPE, TARGET)(TARGET target)
 {
     foreach(member; __traits(allMembers, SCOPE))
     {
-        enum canGetProtection = __traits(compiles, {
-            enum prot = __traits(getProtection, __traits(getMember, SCOPE, member));
-        });
+        enum prot = __traits(getProtection, __traits(getMember, SCOPE, member));
+        enum noReflection = hasUDA!(__traits(getMember, SCOPE, member), NoReflection);
 
-        static if(canGetProtection)
+        static if(!noReflection)
         {
-            enum prot = __traits(getProtection, __traits(getMember, SCOPE, member));
+            alias Alias!(__traits(getMember, SCOPE, member)) mem;
 
-            static if(prot == "public")
+            static if(is(mem == interface)) {
+                target._interfaces ~= reflect!(__traits(getMember, SCOPE, member))();
+            }
+            static if(is(mem == class)) {
+                target._classes ~= reflect!(__traits(getMember, SCOPE, member))();
+            }
+            else static if(is(mem == struct) || is(mem == union)) {
+                target._structs ~= reflect!(__traits(getMember, SCOPE, member))();
+            }
+            else static if(is(mem == enum)) {
+                target._enums ~= reflect!(__traits(getMember, SCOPE, member));
+            }
+            else static if(isDelegate!(__traits(getMember, SCOPE, member))) {
+
+            }
+            else static if(isFunctionPointer!(__traits(getMember, SCOPE, member))) {
+
+            }
+            else static if(isSomeFunction!(__traits(getMember, SCOPE, member)) && !isReservedMethod!mem)
             {
-                enum noReflection = hasUDA!(__traits(getMember, SCOPE, member), NoReflection);
+                enum isProp = (functionAttributes!mem & FunctionAttribute.property) != 0;
+                static if(isProp)
+                    const(Method)[] getters, setters;
 
-                static if(!noReflection)
+                foreach(overload; __traits(getOverloads, SCOPE, member))
                 {
-                    alias Alias!(__traits(getMember, SCOPE, member)) mem;
+                    target._methods ~= reflect!(overload);
 
-                    static if(is(mem == interface)) {
-                        target._interfaces ~= reflect!(__traits(getMember, SCOPE, member))();
-                    }
-                    static if(is(mem == class)) {
-                        target._classes ~= reflect!(__traits(getMember, SCOPE, member))();
-                    }
-                    else static if(is(mem == struct) || is(mem == union)) {
-                        target._structs ~= reflect!(__traits(getMember, SCOPE, member))();
-                    }
-                    else static if(is(mem == enum)) {
-                        target._enums ~= reflect!(__traits(getMember, SCOPE, member));
-                    }
-                    else static if(isDelegate!(__traits(getMember, SCOPE, member))) {
-
-                    }
-                    else static if(isFunctionPointer!(__traits(getMember, SCOPE, member))) {
-
-                    }
-                    else static if(isSomeFunction!(__traits(getMember, SCOPE, member)) && !isReservedMethod!mem)
+                    static if(isProp)
                     {
-                        enum isProp = (functionAttributes!mem & FunctionAttribute.property) != 0;
-                        static if(isProp)
-                            const(Method)[] getters, setters;
+                        static if(!is(ReturnType!overload == void))
+                            getters ~= reflect!(overload);
 
-                        foreach(overload; __traits(getOverloads, SCOPE, member))
-                        {
-                            target._methods ~= reflect!(overload);
-
-                            static if(isProp)
-                            {
-                                static if(!is(ReturnType!overload == void))
-                                    getters ~= reflect!(overload);
-
-                                static if(ParameterTypeTuple!overload.length > 0)
-                                    setters ~= reflect!(overload);
-                            }
-                        }
-
-                        static if(isProp)
-                            target._properties ~= new Property(member, getters, setters);
-                    }
-                    else static if(isField!(__traits(getMember, SCOPE, member)))
-                    {
-                        alias FT = typeof(mem);
-
-                        static if(__traits(compiles, { enum _ = mem.offsetof; })) {
-                            enum offset = mem.offsetof;
-                            enum isStatic = false;
-                        }
-                        else {
-                            enum offset = 0;
-                            enum isStatic = true;
-                        }
-
-                        Field.Operator operator = (ref Box target, Box* value, Field.Operation operation)
-                        {
-                            final switch(operation)
-                            {
-                                case Field.Operation.Set:
-                                    static if(isSetSupported!FT)
-                                    {
-                                        static if(isStatic) {
-                                            mem = cast(FT)(*value);
-                                        }
-                                        else
-                                        {
-                                            static if(is(SCOPE == class) || is(SCOPE == interface)) {
-                                                SCOPE tar = cast(SCOPE)target;
-                                            }
-                                            else static if(is(SCOPE == struct)) {
-                                                bool isPtr = (target.type == typeid(SCOPE*));
-                                                SCOPE* tar = isPtr ? cast(SCOPE*)target : cast(SCOPE*)target.ptr;
-                                            }
-                                            else {
-                                                static assert(0, "target instance must be a class, interface, or struct*");
-                                            }
-
-                                            *cast(FT*)(cast(void*)tar + offset) = cast(FT)*value;
-                                        }
-                                    }
-                                    else
-                                    {
-                                        writeln("setValue not supported for this field type");
-                                    }
-                                    break;
-                                case Field.Operation.Get:
-                                    static if(isGetSupported!FT)
-                                    {
-                                        static if(isStatic) {
-                                            *value = mem;
-                                        }
-                                        else
-                                        {
-                                            static if(is(SCOPE == class) || is(SCOPE == interface)) {
-                                                SCOPE tar = cast(SCOPE)target;
-                                            }
-                                            else static if(is(SCOPE == struct)) {
-                                                bool isPtr = (target.type == typeid(SCOPE*));
-                                                SCOPE* tar = isPtr ? cast(SCOPE*)target : cast(SCOPE*)target.ptr;
-                                            }
-                                            else {
-                                                static assert(0, "instance type must be a class, interface, or struct*");
-                                            }
-
-                                            *value = *cast(FT*)(cast(void*)tar + offset);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        writeln("setValue not supported for this field type");
-                                    }
-                                    break;
-                                case Field.Operation.Address:
-                                    static if(isStatic) {
-                                        *value = cast(void*)(&mem);
-                                    }
-                                    else
-                                    {
-                                        static if(is(SCOPE == class) || is(SCOPE == interface)) {
-                                            SCOPE tar = cast(SCOPE)target;
-                                        }
-                                        else static if(is(SCOPE == struct)) {
-                                            bool isPtr = (target.type == typeid(SCOPE*));
-                                            SCOPE* tar = isPtr ? cast(SCOPE*)target : cast(SCOPE*)target.ptr;
-                                        }
-                                        else {
-                                            static assert(0, "instance type must be a class, interface, or struct*");
-                                        }
-
-                                        *value = cast(void*)tar + offset;
-                                    }
-                                    break;
-                            }
-                        };
-
-                        target._fields ~= new Field(
-                            __traits(identifier, mem),
-                            FT.stringof,
-                            typeid(FT),
-                            toProtection!(__traits(getProtection, mem)),
-                            fullyQualifiedName!FT,
-                            offset,
-                            isStatic,
-                            operator);
-                    }
-                    else {
-                        //pragma(msg, "UNSUPPORTED SYMBOL: " ~ member);
+                        static if(ParameterTypeTuple!overload.length > 0)
+                            setters ~= reflect!(overload);
                     }
                 }
-                else
-                {
-                    // @NoReflection
-                }
-            }
-            else
-            {
-                // Only private instance fields can be reflected using tupleof below.
-                // It may become possible in the future to reflect private members normally.
-            }
-        }
-    }
 
-    // fill in the private instance fields that were skipped above
-    static if(is(SCOPE == class) || is(SCOPE == interface) || is(SCOPE == struct) || is(SCOPE == union))
-    {
-        static if(is(SCOPE == class))
-            alias Scopes = AliasSeq!(SCOPE, BaseClassesTuple!SCOPE);
-        else
-            alias Scopes = AliasSeq!(SCOPE);
-        
-        foreach(C; Scopes)
-        {
-            foreach(i, _; typeof(C.tupleof))
+                static if(isProp)
+                    target._properties ~= new Property(member, getters, setters);
+            }
+            else static if(isField!(__traits(getMember, SCOPE, member)))
             {
-                enum prot = toProtection!(__traits(getProtection, C.tupleof[i]));
+                alias FT = typeof(mem);
 
-                static if(prot == Protection.Private ||
-                          prot == Protection.Protected ||
-                          prot == Protection.Package)
-                {
-                    alias FT = typeof(C.tupleof[i]);
-                    enum offset = C.tupleof[i].offsetof;
+                static if(__traits(compiles, { enum _ = mem.offsetof; })) {
+                    enum offset = mem.offsetof;
                     enum isStatic = false;
+                }
+                else {
+                    enum offset = 0;
+                    enum isStatic = true;
+                }
 
-                    Field.Operator operator = (ref Box target, Box* value, Field.Operation operation)
+                Field.Operator operator = (ref Box target, Box* value, Field.Operation operation)
+                {
+                    final switch(operation)
                     {
-                        final switch(operation)
-                        {
                         case Field.Operation.Set:
                             static if(isSetSupported!FT)
                             {
-                                static if(is(SCOPE == class) || is(SCOPE == interface)) {
-                                    SCOPE tar = cast(SCOPE)target;
+                                static if(isStatic) {
+                                    mem = cast(FT)(*value);
                                 }
-                                else static if(is(SCOPE == struct)) {
-                                    bool isPtr = (target.type == typeid(SCOPE*));
-                                    SCOPE* tar = isPtr ? cast(SCOPE*)target : cast(SCOPE*)target.ptr;
-                                }
-                                else {
-                                    static assert(0, "target instance must be a class, interface, or struct*");
-                                }
+                                else
+                                {
+                                    static if(is(SCOPE == class) || is(SCOPE == interface)) {
+                                        SCOPE tar = cast(SCOPE)target;
+                                    }
+                                    else static if(is(SCOPE == struct)) {
+                                        bool isPtr = (target.type == typeid(SCOPE*));
+                                        SCOPE* tar = isPtr ? cast(SCOPE*)target : cast(SCOPE*)target.ptr;
+                                    }
+                                    else {
+                                        static assert(0, "target instance must be a class, interface, or struct*");
+                                    }
 
-                                *cast(FT*)(cast(void*)tar + offset) = cast(FT)*value;
+                                    *cast(FT*)(cast(void*)tar + offset) = cast(FT)*value;
+                                }
                             }
                             else
                             {
                                 writeln("setValue not supported for this field type");
                             }
                             break;
-
                         case Field.Operation.Get:
                             static if(isGetSupported!FT)
+                            {
+                                static if(isStatic) {
+                                    *value = mem;
+                                }
+                                else
+                                {
+                                    static if(is(SCOPE == class) || is(SCOPE == interface)) {
+                                        SCOPE tar = cast(SCOPE)target;
+                                    }
+                                    else static if(is(SCOPE == struct)) {
+                                        bool isPtr = (target.type == typeid(SCOPE*));
+                                        SCOPE* tar = isPtr ? cast(SCOPE*)target : cast(SCOPE*)target.ptr;
+                                    }
+                                    else {
+                                        static assert(0, "instance type must be a class, interface, or struct*");
+                                    }
+
+                                    *value = *cast(FT*)(cast(void*)tar + offset);
+                                }
+                            }
+                            else
+                            {
+                                writeln("setValue not supported for this field type");
+                            }
+                            break;
+                        case Field.Operation.Address:
+                            static if(isStatic) {
+                                *value = cast(void*)(&mem);
+                            }
+                            else
                             {
                                 static if(is(SCOPE == class) || is(SCOPE == interface)) {
                                     SCOPE tar = cast(SCOPE)target;
@@ -1446,43 +1336,30 @@ TARGET parseScope(alias SCOPE, TARGET)(TARGET target)
                                 else {
                                     static assert(0, "instance type must be a class, interface, or struct*");
                                 }
-                            
-                                *value = *cast(FT*)(cast(void*)tar + offset);
-                            }
-                            else
-                            {
-                                writeln("setValue not supported for this field type");
+
+                                *value = cast(void*)tar + offset;
                             }
                             break;
+                    }
+                };
 
-                        case Field.Operation.Address:
-                            static if(is(SCOPE == class) || is(SCOPE == interface)) {
-                                SCOPE tar = cast(SCOPE)target;
-                            }
-                            else static if(is(SCOPE == struct)) {
-                                bool isPtr = (target.type == typeid(SCOPE*));
-                                SCOPE* tar = isPtr ? cast(SCOPE*)target : cast(SCOPE*)target.ptr;
-                            }
-                            else {
-                                static assert(0, "instance type must be a class, interface, or struct*");
-                            }
-
-                            *value = cast(void*)tar + offset;
-                            break;
-                        }
-                    };
-
-                    target._fields ~= new Field(
-                        __traits(identifier, C.tupleof[i]),
-                        FT.stringof,
-                        typeid(FT),
-                        prot,
-                        fullyQualifiedName!FT,
-                        offset,
-                        isStatic,
-                        operator);
-                }
+                target._fields ~= new Field(
+                    __traits(identifier, mem),
+                    FT.stringof,
+                    typeid(FT),
+                    toProtection!(__traits(getProtection, mem)),
+                    fullyQualifiedName!FT,
+                    offset,
+                    isStatic,
+                    operator);
             }
+            else {
+                //pragma(msg, "UNSUPPORTED SYMBOL: " ~ member);
+            }
+        }
+        else
+        {
+            // @NoReflection
         }
     }
 

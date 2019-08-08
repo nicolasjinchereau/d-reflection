@@ -196,7 +196,6 @@ private:
                     store.buffer[(T*).sizeof..$] = 0;
                     return true;
                 }
-                break;
             case Operation.Read:
                 static if(is(T == class) || is(T == interface))
                 {
@@ -296,7 +295,6 @@ private:
                     *cast(void**)param = *cast(void**)store.buffer.ptr;
                     return true;
                 }
-                break;
 
             case Operation.Destruct:
                 static if(T.sizeof > StorageSize)
