@@ -129,6 +129,11 @@ abstract class Scope : Reflection
         return findByName(_enums, name);
     }
 
+    final const(Accessor) getAccessor(string name) const {
+        auto field = findByName(_fields, name);
+        return field ? field : findByName(_properties, name);
+    }
+
     final const(Field) getField(string name) const {
         return findByName(_fields, name);
     }
@@ -454,7 +459,69 @@ final class Scalar : Reflection
     }
 }
 
-final class Field : Reflection
+abstract class Accessor : Reflection
+{
+    protected Box getBoxedValue(ref Box target) const;
+    protected void setBoxedValue(ref Box target, ref Box value) const;
+    @property bool canGetValue() const;
+    @property bool canSetValue() const;
+    @property const(Reflection) getterReturnType() const;
+    @property const(Reflection) setterParameterType() const;
+
+    Box getValue(Target)(auto ref Target target) const
+    {
+        static if(is(Target == Box)) {
+            return _getValue(target);
+        }
+        else static if(is(Target == struct)) {
+            Box tar = &target;
+            return _getValue(tar);
+        }
+        else static if(is(Target == typeof(null)) ||
+                       is(Target == class) ||
+                           is(Target == interface) ||
+                               (isPointer!Target && is(PointerTarget!Target == struct)))
+        {
+            Box tar = target;
+            return _getValue(tar);
+        }
+        else
+        {
+            static assert(0, "invalid accessor target '" ~ Target.stringof ~ "' - " ~
+                          "target must be a class, interface, struct, struct*, null, " ~
+                          "or a Box containing one of those types");
+        }
+    }
+
+    void setValue(Target, Value)(auto ref Target target, auto ref Value value) const
+    {
+        Box val = value;
+
+        static if(is(Target == Box)) {
+            _setValue(target, val);
+        }
+        else static if(is(Target == struct)) {
+            Box tar = &target;
+            _setValue(tar, val);
+        }
+        else static if(is(Target == typeof(null)) ||
+                       is(Target == class) ||
+                           is(Target == interface) ||
+                               (isPointer!Target && is(PointerTarget!Target == struct)))
+        {
+            Box tar = target;
+            _setValue(tar, val);
+        }
+        else
+        {
+            static assert(0, "invalid field target '" ~ Target.stringof ~ "' - " ~
+                          "target must be a class, interface, struct, struct*, null, " ~
+                          "or a Box containing one of those types");
+        }
+    }
+}
+
+final class Field : Accessor
 {
     enum Operation
     {
@@ -519,60 +586,30 @@ final class Field : Reflection
         return _isStatic;
     }
 
-    Box getValue(Target)(auto ref Target target) const
-    {
+    protected override Box getBoxedValue(ref Box target) const {
         Box ret;
-
-        static if(is(Target == Box)) {
-            _operator(target, &ret, Operation.Get);
-        }
-        else static if(is(Target == struct)) {
-            Box tar = &target;
-            _operator(tar, &ret, Operation.Get);
-        }
-        else static if(is(Target == typeof(null)) ||
-                       is(Target == class) ||
-                       is(Target == interface) ||
-                       (isPointer!Target && is(PointerTarget!Target == struct)))
-        {
-            Box tar = target;
-            _operator(tar, &ret, Operation.Get);
-        }
-        else
-        {
-            static assert(0, "invalid field target '" ~ Target.stringof ~ "' - " ~
-                          "target must be a class, interface, struct, struct*, null, " ~
-                          "or a Box containing one of those types");
-        }
-
+        _operator(target, &ret, Operation.Get);
         return ret;
     }
 
-    void setValue(Target, Value)(auto ref Target target, auto ref Value value) const
-    {
-        Box val = value;
+    protected override void setBoxedValue(ref Box target, ref Box value) const {
+        _operator(target, &value, Operation.Set);
+    }
 
-        static if(is(Target == Box)) {
-            _operator(target, &val, Operation.Set);
-        }
-        else static if(is(Target == struct)) {
-            Box tar = &target;
-            _operator(tar, &val, Operation.Set);
-        }
-        else static if(is(Target == typeof(null)) ||
-                       is(Target == class) ||
-                       is(Target == interface) ||
-                       (isPointer!Target && is(PointerTarget!Target == struct)))
-        {
-            Box tar = target;
-            _operator(tar, &val, Operation.Set);
-        }
-        else
-        {
-            static assert(0, "invalid field target '" ~ Target.stringof ~ "' - " ~
-                          "target must be a class, interface, struct, struct*, null, " ~
-                          "or a Box containing one of those types");
-        }
+    @property override bool canGetValue() const {
+        return true;
+    }
+
+    @property override bool canSetValue() const {
+        return true;
+    }
+
+    @property override const(Reflection) getterReturnType() const {
+        return reflect(_fieldTypeName);
+    }
+
+    @property override const(Reflection) setterParameterType() const {
+        return reflect(_fieldTypeName);
     }
 
     const(Reflection) fieldType() const {
@@ -603,7 +640,7 @@ final class Method : Reflection
     private bool _isOverride;
     private bool _isProperty;
     private bool _isCallable;
-    private TypeInfo[] _paramTypes;
+    private string[] _paramTypeNames;
     private string[] _paramNames;
     private Invoker _invoker;
 
@@ -611,27 +648,27 @@ final class Method : Reflection
         string name,
         TypeInfo type,
         string returnTypeName,
+        string[] paramTypeNames,
+        string[] paramNames,
         Protection prot,
         bool isStatic,
         bool isFinal,
         bool isOverride,
         bool isProperty,
         bool isCallable,
-        TypeInfo[] paramTypes,
-        string[] paramNames,
         Invoker invoker)
     {
         _name = name;
         _type = type;
         _returnTypeName = returnTypeName;
+        _paramTypeNames = paramTypeNames;
+        _paramNames = paramNames;
         _prot = prot;
         _isStatic = isStatic;
         _isFinal = isFinal;
         _isOverride = isOverride;
         _isProperty = isProperty;
         _isCallable = isCallable;
-        _paramTypes = paramTypes;
-        _paramNames = paramNames;
         _invoker = invoker;
     }
 
@@ -655,10 +692,10 @@ final class Method : Reflection
 
         ret ~= "(";
 
-        foreach(i, ti; _paramTypes)
+        foreach(i, tname; _paramTypeNames)
         {
             if(i > 0) ret ~= ", ";
-            ret ~= ti.toString() ~ " " ~ _paramNames[i];
+            ret ~= tname ~ " " ~ _paramNames[i];
         }
 
         ret ~= ")";
@@ -694,8 +731,8 @@ final class Method : Reflection
         return reflect(_returnTypeName);
     }
 
-    @property TypeInfo[] parameterTypes() const {
-        return cast(TypeInfo[])_paramTypes;
+    @property ReflectionRange parameterTypes() const {
+        return ReflectionRange(cast(string[])_paramTypeNames);
     }
 
     @property string[] parameterNames() const {
@@ -755,7 +792,7 @@ final class Method : Reflection
     }
 }
 
-final class Property : Reflection
+final class Property : Accessor
 {
     private string _name;
     private const(Method)[] _getters;
@@ -794,22 +831,70 @@ final class Property : Reflection
     }
 
     @property const(Reflection) paramType() const {
-        assert(_getters.length);
-        return reflect(_setters[0].parameterTypes[0].toString());
+        assert(_setters.length);
+        return _setters[0].parameterTypes.front;
     }
 
-    Box getValue(Target)(auto ref Target target) const {
+    protected override Box getBoxedValue(ref Box target) const {
         assert(_getters.length);
         return _getters[0].invoke(target);
     }
 
-    void setValue(Target, Value)(auto ref Target target, auto ref Value value) const {
+    protected override void setBoxedValue(ref Box target, ref Box value) const {
         assert(_setters.length);
         _setters[0].invoke(target, value);
     }
 
+    @property override bool canGetValue() const {
+        return _getters.length != 0;
+    }
+
+    @property override bool canSetValue() const {
+        return _setters.length != 0;
+    }
+
+    @property override const(Reflection) getterReturnType() const {
+        assert(_getters.length);
+        return _getters[0].returnType();
+    }
+
+    @property override const(Reflection) setterParameterType() const {
+        assert(_setters.length);
+        return _setters[0].parameterTypes.front;
+    }
+
     override string toString() const {
-        return "@property " ~ _name;
+        auto getStr = canGetValue() ? "get" : "";
+        auto setStr = canSetValue() ? (canGetValue() ? ", " : "") ~ "set" : "";
+        return "@property " ~ _name ~ "(" ~ getStr ~ setStr ~ ")";
+    }
+}
+
+struct ReflectionRange
+{
+    private string[] _typeNames;
+    private Rebindable!(const Reflection) _current;
+
+    private this(string[] typeNames)
+    {
+        _typeNames = typeNames;
+        if(_typeNames.length)
+            _current = reflect(_typeNames[0]);
+    }
+
+    bool empty() const {
+        return _typeNames.length == 0;
+    }
+
+    const(Reflection) front() const {
+        assert(!empty);
+        return _current;
+    }
+
+    void popFront() {
+        assert(!empty);
+        _typeNames = _typeNames[1..$];
+        if(_typeNames.length) _current = reflect(_typeNames[0]);
     }
 }
 
@@ -860,6 +945,30 @@ private:
 
 Rebindable!(const(Reflection))[string] _reflections;
 
+final class Reflector(T) if(isScalarType!T)
+{
+    static this() {
+        _reflections[fullyQualifiedName!T] = get();
+    }
+
+    static auto get()
+    {
+        static Box getter(void* ptr) {
+            return Box(*cast(T*)ptr);
+        }
+
+        static void setter(void* ptr, ref Box value) {
+            static if(isSetSupported!T)
+                *(cast(T*)ptr) = cast(T)value;
+            else
+                assert(0);
+        }
+
+        static const(Scalar) refl = new Scalar(T.stringof, typeid(T), &getter, &setter);
+        return refl;
+    }
+}
+
 final class Reflector(alias T)
 {
     static this()
@@ -872,22 +981,7 @@ final class Reflector(alias T)
 
     static auto get()
     {
-        static if(isScalar!T)
-        {
-            static Box getter(void* ptr) {
-                return Box(*cast(T*)ptr);
-            }
-
-            static void setter(void* ptr, ref Box value) {
-                static if(isSetSupported!T)
-                    *(cast(T*)ptr) = cast(T)value;
-                else
-                    assert(0);
-            }
-
-            static const(Scalar) refl = new Scalar(T.stringof, typeid(T), &getter, &setter);
-        }
-        else static if(isModule!T)
+        static if(isModule!T)
         {
             static const(Module) refl = parseScope!T(new Module(T.stringof[7..$]));
         }
@@ -1019,14 +1113,14 @@ final class Reflector(alias T)
                  __traits(identifier, T),
                  typeid(typeof(&T)),
                  fullyQualifiedName!(ReturnType!T),
+                 paramTypeNames!T,
+                 [ParameterIdentifierTuple!T],
                  protectionOf!T,
                  __traits(isStaticFunction, T),
                  __traits(isFinalFunction, T),
                  __traits(isOverrideFunction, T),
                  (functionAttributes!(T) & FunctionAttribute.property) != 0,
                  isCallable,
-                 paramTypes!T,
-                 [ParameterIdentifierTuple!T],
                  &invoker);
         }
         else
@@ -1038,11 +1132,11 @@ final class Reflector(alias T)
     }
 }
 
-TypeInfo[] paramTypes(alias T)()
+string[] paramTypeNames(alias T)()
 {
     alias Types = ParameterTypeTuple!(typeof(&T));
-    TypeInfo[] ret = new TypeInfo[Types.length];
-    foreach(i, ty; Types) ret[i] = typeid(ty);
+    string[] ret = new string[Types.length];
+    foreach(i, Ty; Types) ret[i] = fullyQualifiedName!Ty;
     return ret;
 }
 
@@ -1057,15 +1151,17 @@ template isSetSupported(T) {
 
 const(Constant)[] enumMembers(T)()
 {
-    const(Constant)[] ret;
-    foreach(member; __traits(allMembers, T))
+    alias allMembers = AliasSeq!(__traits(allMembers, T));
+    auto ret = new Constant[allMembers.length];
+
+    foreach(i, member; allMembers)
     {
         static if(__traits(hasMember, T, member))
         {
             alias M = Alias!(__traits(getMember, T, member));
             alias OriginalType!(typeof(M)) OT;
             Box function() getter = { return Box(cast(OT)M); };
-            ret ~= new Constant(__traits(identifier, M), typeid(M), protectionOf!M, getter, to!string(cast(OT)M));
+            ret[i] = new Constant(__traits(identifier, M), typeid(M), protectionOf!M, getter, to!string(cast(OT)M));
         }
     }
     return ret;
@@ -1089,10 +1185,12 @@ template isScalar(string fqn)
         enum isScalar = false;
 }
 
-const(Interface)[] baseInterfaces(T)() {
-    const(Interface)[] ret;
-    foreach(i; InterfacesTuple!T)
-        ret ~= reflect!(i);
+const(Interface)[] baseInterfaces(T)()
+{
+    alias Itfs = InterfacesTuple!T;
+    Interface[] ret = new Interface[Itfs.length];
+    foreach(i, Itf; Itfs)
+        ret[i] = reflect!Itf;
     return ret;
 }
 
@@ -1114,8 +1212,7 @@ template owningModule(alias T)
         alias owningModule = owningModule!parent;
 }
 
-template isModule(alias T)
-{
+template isModule(alias T) {
     enum isModule = __traits(isModule, T);
 }
 
@@ -1197,11 +1294,30 @@ template isReservedMethod(alias M)
     enum isReservedMethod = id.length >= 2 && id[0..2] == "__";
 }
 
+template isProperty(alias T) {
+    enum isProperty = (functionAttributes!T & FunctionAttribute.property) != 0;
+}
+
+template isGetterProperty(alias T)
+{
+    static if(isProperty!T && !is(ReturnType!T == void) && (arity!T == 0))
+        enum isGetterProperty = true;
+    else
+        enum isGetterProperty = false;
+}
+
+template isSetterProperty(alias T)
+{
+    static if(isProperty!T && is(ReturnType!T == void) && (arity!T == 1))
+        enum isSetterProperty = true;
+    else
+        enum isSetterProperty = false;
+}
+
 TARGET parseScope(alias SCOPE, TARGET)(TARGET target)
 {
     foreach(member; __traits(allMembers, SCOPE))
     {
-        enum prot = __traits(getProtection, __traits(getMember, SCOPE, member));
         enum noReflection = hasUDA!(__traits(getMember, SCOPE, member), NoReflection);
 
         static if(!noReflection)
@@ -1228,26 +1344,45 @@ TARGET parseScope(alias SCOPE, TARGET)(TARGET target)
             }
             else static if(isSomeFunction!(__traits(getMember, SCOPE, member)) && !isReservedMethod!mem)
             {
-                enum isProp = (functionAttributes!mem & FunctionAttribute.property) != 0;
-                static if(isProp)
-                    const(Method)[] getters, setters;
+                enum isProp = isProperty!mem;
 
-                foreach(overload; __traits(getOverloads, SCOPE, member))
+                alias OverloadSeq = AliasSeq!(__traits(getOverloads, SCOPE, member));
+                
+                static if(isProp) {
+                    alias AllGetters = Filter!(isGetterProperty, OverloadSeq);
+                    alias AllSetters = Filter!(isSetterProperty, OverloadSeq);
+                    Method[] getters = new Method[AllGetters.length];
+                    Method[] setters = new Method[AllSetters.length];
+                    size_t getterCount = 0;
+                    size_t setterCount = 0;
+                }
+                else
                 {
-                    target._methods ~= reflect!(overload);
+                    Method[] overloads = new Method[OverloadSeq.length];
+                }
+
+                foreach(i, Overload; OverloadSeq)
+                {
+                    Method method = cast(Method)reflect!Overload;
 
                     static if(isProp)
                     {
-                        static if(!is(ReturnType!overload == void))
-                            getters ~= reflect!(overload);
+                        static if(isGetterProperty!Overload)
+                            getters[getterCount++] = method;
 
-                        static if(ParameterTypeTuple!overload.length > 0)
-                            setters ~= reflect!(overload);
+                        static if(isSetterProperty!Overload)
+                            setters[setterCount++] = method;
+                    }
+                    else
+                    {
+                        overloads[i] = method;
                     }
                 }
 
                 static if(isProp)
-                    target._properties ~= new Property(member, getters, setters);
+                    target._properties ~= new Property(member, cast(const(Method)[])getters, cast(const(Method)[])setters);
+                else
+                    target._methods ~= cast(const(Method)[])overloads;
             }
             else static if(isField!(__traits(getMember, SCOPE, member)))
             {
@@ -1365,3 +1500,23 @@ TARGET parseScope(alias SCOPE, TARGET)(TARGET target)
 
     return target;
 }
+
+static _rbool = reflect!bool;
+static _rbyte = reflect!byte;
+static _rubyte = reflect!ubyte;
+static _rshort = reflect!short;
+static _rushort = reflect!ushort;
+static _rint = reflect!int;
+static _ruint = reflect!uint;
+static _rfloat = reflect!float;
+static _rdouble = reflect!double;
+static _rreal = reflect!real;
+static _rchar = reflect!char;
+static _rwchar = reflect!wchar;
+static _rdchar = reflect!dchar;
+//static _rifloat = reflect!ifloat;
+//static _ridouble = reflect!idouble;
+//static _rireal = reflect!ireal;
+//static _rcfloat = reflect!cfloat;
+//static _rcdouble = reflect!cdouble;
+//static _rcreal = reflect!creal;

@@ -1,6 +1,7 @@
 module main;
 
 import std.stdio;
+import std.conv;
 import reflection;
 import test;
 
@@ -20,6 +21,13 @@ int main(string[] args)
 
     foreach(const(Method) method; classRefl.methods) {
         writeln(method);
+    }
+
+    writeln();
+    writeln("Test1 properties:");
+
+    foreach(const(Property) property; classRefl.properties) {
+        writeln(property);
     }
 
     return 0;

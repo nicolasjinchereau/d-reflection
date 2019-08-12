@@ -11,12 +11,16 @@ class Test1
 
     }
 
-    final int func2(int arg1, bool arg2) {
+    final float func2(int arg1, bool arg2) {
+        return field2;
+    }
+
+    @property private int prop1() {
         return field1;
     }
 
-    private void func3() {
-        
+    @property private void prop1(int i) {
+        field1 = i;
     }
 }
 
